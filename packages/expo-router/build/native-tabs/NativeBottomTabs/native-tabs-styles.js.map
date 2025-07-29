@@ -1,0 +1,1 @@
+{"version":3,"file":"native-tabs-styles.js","sourceRoot":"","sources":["../../../src/native-tabs/NativeBottomTabs/native-tabs-styles.ts"],"names":[],"mappings":";;AAAA,MAAM,OAAO,GAA8B,EAAE,CAAC;AAC9C,kBAAe,OAAO,CAAC","sourcesContent":["const classes: { [key: string]: string } = {};\nexport default classes;\n"]}

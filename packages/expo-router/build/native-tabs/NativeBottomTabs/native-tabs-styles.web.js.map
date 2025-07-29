@@ -1,0 +1,1 @@
+{"version":3,"file":"native-tabs-styles.web.js","sourceRoot":"","sources":["../../../src/native-tabs/NativeBottomTabs/native-tabs-styles.web.ts"],"names":[],"mappings":";;;;;AAAA,oGAA4D;AAE5D,kBAAe,gCAAM,CAAC","sourcesContent":["import styles from '../../../assets/native-tabs.module.css';\n\nexport default styles;\n"]}
