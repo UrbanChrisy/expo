@@ -1,0 +1,99 @@
+---
+title: Data loaders
+description: Learn how to use data loaders to fetch data for your SSG/SSR app with Expo Router.
+---
+
+import { Collapsible } from '~/ui/components/Collapsible';
+import { Terminal } from '~/ui/components/Snippet';
+import { Step } from '~/ui/components/Step';
+
+> **important** Data loaders are an experimental feature, and require a [deployed server](/router/reference/api-routes/#deployment) for production use.
+
+## Setup
+
+<Step label="1">
+
+### Enable data loaders in your app configuration
+
+First, configure your app to use server output by adding the server configuration to your [app config](/versions/latest/config/app/):
+
+```json app.json
+{
+  "expo": {
+    /* @hide ... */
+    /* @end */
+    "web": {
+      /* @info Data loaders are only supported in static or server mode */
+      "output": "static"
+      /* @end */
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          /* @info Enables data loaders */
+          "unstable_useServerDataLoaders": true
+          /* @end */
+        }
+      ]
+    ]
+  }
+}
+```
+
+</Step>
+
+<Step label="2">
+
+### Add a data loader to a route:
+
+```tsx app/index.tsx
+export async function loader() {
+  return Promise.resolve({
+    foo: 'bar',
+  });
+}
+
+export default function Index() {
+  const data = useLoader(loader);
+
+  return (
+    <View
+      style={{
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+      }}>
+      <Text>{JSON.stringify(data)}</Text>
+    </View>
+  );
+}
+```
+
+</Step>
+
+<Step label="3">
+
+### Start your development server
+
+Run your development server to test the data loader:
+
+<Terminal cmd={['$ npx expo start']} />
+
+</Step>
+
+<Step label="4">
+
+### Test your data loader
+
+Visit your app in a browser or make requests to test that your data loader is working.
+
+</Step>
+
+## How it works
+
+## Limitations
+
+- Data loaders cannot be used in **\_layout** routes
+- Data loaders only work with `web.output: static`
+- The request object passed to the loader function is immutable.
