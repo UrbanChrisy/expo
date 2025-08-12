@@ -10,8 +10,7 @@ public class AudioModule: Module {
   private var interruptionMode: InterruptionMode = .mixWithOthers
   private var interruptedPlayers = Set<String>()
   private var playerVolumes = [String: Float]()
-  private var allowsRecording = false
-  private var sessionOptions: AVAudioSession.CategoryOptions = []
+  private var interruptedRecorders = Set<String>()
 
   public func definition() -> ModuleDefinition {
     Name("ExpoAudio")
@@ -81,9 +80,6 @@ public class AudioModule: Module {
         let avPlayer = AudioUtils.createAVPlayer(from: source)
         let player = AudioPlayer(avPlayer, interval: updateInterval)
         player.owningRegistry = self.registry
-        player.onPlaybackComplete = { [weak self] in
-          self?.deactivateSession()
-        }
         self.registry.add(player)
         return player
       }
@@ -135,11 +131,7 @@ public class AudioModule: Module {
       }
 
       Property("playbackRate") { player in
-        return if player.isPlaying {
-          player.ref.rate
-        } else {
-          player.currentRate
-        }
+        player.ref.rate
       }
 
       Property("paused") { player in
@@ -157,19 +149,17 @@ public class AudioModule: Module {
       }
 
       Function("play") { player in
-        try activateSession()
+        guard sessionIsActive else {
+          return
+        }
         let rate = player.currentRate > 0 ? player.currentRate : 1.0
         player.play(at: rate)
       }
 
       Function("setPlaybackRate") { (player, rate: Double, pitchCorrectionQuality: PitchCorrectionQuality?) in
         let playerRate = rate < 0 ? 0.0 : Float(min(rate, 2.0))
+        player.ref.rate = playerRate
         player.currentRate = playerRate
-
-        if player.isPlaying {
-          player.ref.rate = playerRate
-        }
-
         if player.shouldCorrectPitch {
           player.pitchCorrectionQuality = pitchCorrectionQuality?.toPitchAlgorithm() ?? .varispeed
           player.ref.currentItem?.audioTimePitchAlgorithm = player.pitchCorrectionQuality
@@ -182,7 +172,6 @@ public class AudioModule: Module {
 
       Function("pause") { player in
         player.ref.pause()
-        deactivateSession()
       }
 
       Function("remove") { player in
@@ -195,11 +184,12 @@ public class AudioModule: Module {
         }
       }
 
-      AsyncFunction("seekTo") { (player: AudioPlayer, seconds: Double, toleranceMillisBefore: Double?, toleranceMillisAfter: Double?) in
-        await player.seekTo(
-          seconds: seconds,
-          toleranceMillisBefore: toleranceMillisBefore,
-          toleranceMillisAfter: toleranceMillisAfter
+      AsyncFunction("seekTo") { (player: AudioPlayer, seconds: Double) in
+        await player.ref.currentItem?.seek(
+          to: CMTime(
+            seconds: seconds,
+            preferredTimescale: CMTimeScale(NSEC_PER_SEC)
+          )
         )
       }
     }
@@ -212,7 +202,6 @@ public class AudioModule: Module {
         let avRecorder = AudioUtils.createRecorder(directory: recordingDir, with: options)
         let recorder = AudioRecorder(avRecorder)
         recorder.owningRegistry = self.registry
-        recorder.allowsRecording = allowsRecording
         self.registry.add(recorder)
 
         return recorder
@@ -235,32 +224,12 @@ public class AudioModule: Module {
       }
 
       AsyncFunction("prepareToRecordAsync") { (recorder, options: RecordingOptions?) in
-        try recorder.prepare(options: options, sessionOptions: sessionOptions)
+        try recorder.prepare(options: options)
       }
 
-      Function("record") { (recorder: AudioRecorder, options: RecordOptions?) in
+      Function("record") { (recorder: AudioRecorder) -> [String: Any] in
         try checkPermissions()
-
-        switch (options?.atTime, options?.forDuration) {
-        case let (atTime?, forDuration?):
-          // Convert relative delay to absolute device time
-          let absoluteTime = recorder.ref.deviceCurrentTime + TimeInterval(atTime)
-          recorder.ref.record(atTime: absoluteTime, forDuration: TimeInterval(forDuration))
-          recorder.updateStateForDirectRecording()
-          return recorder.getRecordingStatus()
-        case let (atTime?, nil):
-          // Convert relative delay to absolute device time
-          let absoluteTime = recorder.ref.deviceCurrentTime + TimeInterval(atTime)
-          recorder.ref.record(atTime: absoluteTime)
-          recorder.updateStateForDirectRecording()
-          return recorder.getRecordingStatus()
-        case let (nil, forDuration?):
-          recorder.ref.record(forDuration: TimeInterval(forDuration))
-          recorder.updateStateForDirectRecording()
-          return recorder.getRecordingStatus()
-        case (nil, nil):
-          return try recorder.startRecording()
-        }
+        return recorder.startRecording()
       }
 
       Function("pause") { recorder in
@@ -364,6 +333,7 @@ public class AudioModule: Module {
     registry.allRecorders.values.forEach { recorder in
       if recorder.isRecording {
         recorder.pauseRecording()
+        interruptedRecorders.insert(recorder.id)
       }
     }
 #endif
@@ -409,16 +379,22 @@ public class AudioModule: Module {
       }
     }
 
-#if os(iOS)
-    registry.allRecorders.values.forEach { recorder in
-      if recorder.allowsRecording && !recorder.isRecording {
-        _ = try? recorder.startRecording()
-      }
-    }
-#endif
+    resumeInterruptedRecorders()
 
     interruptedPlayers.removeAll()
     playerVolumes.removeAll()
+  }
+
+  private func resumeInterruptedRecorders() {
+#if os(iOS)
+    registry.allRecorders.values.forEach { recorder in
+      if interruptedRecorders.contains(recorder.id) && recorder.allowsRecording && !recorder.isRecording {
+        _ = recorder.startRecording()
+      }
+    }
+    
+    interruptedRecorders.removeAll()
+#endif
   }
 
   private func pauseAllPlayers() {
@@ -440,10 +416,10 @@ public class AudioModule: Module {
   }
 
   private func recordingDirectory() throws -> URL {
-    guard let cachesDir = appContext?.fileSystem?.cachesDirectory else {
+    guard let cachesDir = appContext?.fileSystem?.cachesDirectory, let directory = URL(string: cachesDir) else {
       throw Exceptions.AppContextLost()
     }
-    return URL(fileURLWithPath: cachesDir)
+    return directory
   }
 
   private func setIsAudioActive(_ isActive: Bool) throws {
@@ -463,18 +439,18 @@ public class AudioModule: Module {
     try AudioUtils.validateAudioMode(mode: mode)
     let session = AVAudioSession.sharedInstance()
     var category: AVAudioSession.Category = session.category
+    var options: AVAudioSession.CategoryOptions = session.categoryOptions
 
     self.shouldPlayInBackground = mode.shouldPlayInBackground
     self.interruptionMode = mode.interruptionMode
-    self.allowsRecording = mode.allowsRecording
 
     #if os(iOS)
     if !mode.allowsRecording {
       registry.allRecorders.values.forEach { recorder in
         if recorder.isRecording {
           recorder.ref.stop()
+          recorder.allowsRecording = false
         }
-        recorder.allowsRecording = false
       }
     } else {
       registry.allRecorders.values.forEach { recorder in
@@ -489,51 +465,20 @@ public class AudioModule: Module {
       } else {
         category = .ambient
       }
-      sessionOptions = []
     } else {
       category = mode.allowsRecording ? .playAndRecord : .playback
-
-      var categoryOptions: AVAudioSession.CategoryOptions = []
       switch mode.interruptionMode {
       case .doNotMix:
         break
       case .duckOthers:
-        categoryOptions.insert(.duckOthers)
+        options = [.duckOthers]
       case .mixWithOthers:
-        categoryOptions.insert(.mixWithOthers)
-      }
-
-#if !os(tvOS)
-      if category == .playAndRecord {
-        categoryOptions.insert(.allowBluetooth)
-      }
-#endif
-
-      sessionOptions = categoryOptions
-    }
-
-    try session.setCategory(category, options: sessionOptions)
-  }
-
-  private func activateSession() throws {
-    try AVAudioSession.sharedInstance().setActive(true, options: [.notifyOthersOnDeactivation])
-  }
-
-  private func deactivateSession() {
-    // We need to give isPlaying time to update before running this
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-      guard let self else {
-        return
-      }
-      let hasActivePlayers = self.registry.allPlayers.values.contains { $0.isPlaying }
-      if !hasActivePlayers {
-        do {
-          try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-        } catch {
-          print("Failed to deactivate audio session: \(error)")
-        }
+        options = [.mixWithOthers]
       }
     }
+
+    try session.setCategory(category, options: options)
+    try session.setActive(true, options: [.notifyOthersOnDeactivation])
   }
 
   private func checkPermissions() throws {
